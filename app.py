@@ -1200,14 +1200,22 @@ with tab_season:
         if piv.empty:
             st.info("Nothing to show for this selection.")
         else:
-            if metric == "Sales":
-                sty = piv.style.format(lambda v: fmt_currency(v)).background_gradient(axis=None)
-            else:
-                piv_u = piv.applymap(lambda v: int(round(float(v))) if pd.notna(v) else 0)
-                sty = piv_u.style.format(lambda v: fmt_int(v)).background_gradient(axis=None)
-
-            st.dataframe(sty, use_container_width=True, height=_table_height(piv.reset_index(), max_px=1200), hide_index=False)
-
+            # Try heatmap styling; if matplotlib isn't available, fall back to plain table styling
+            try:
+                if metric == "Sales":
+                    sty = piv.style.format(lambda v: fmt_currency(v)).background_gradient(axis=None)
+                else:
+                    piv_u = piv.applymap(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+                    sty = piv_u.style.format(lambda v: fmt_int(v)).background_gradient(axis=None)
+                st.dataframe(sty, use_container_width=True, height=_table_height(piv.reset_index(), max_px=1200), hide_index=False)
+            except Exception:
+                if metric == "Sales":
+                    st.dataframe(piv.reset_index().style.format({c: (lambda v: fmt_currency(v)) for c in piv.reset_index().columns if c != piv.reset_index().columns[0]}),
+                                 use_container_width=True, height=_table_height(piv.reset_index(), max_px=1200), hide_index=True)
+                else:
+                    piv_u = piv.applymap(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+                    st.dataframe(piv_u.reset_index().style.format({c: (lambda v: fmt_int(v)) for c in piv_u.reset_index().columns if c != piv_u.reset_index().columns[0]}),
+                                 use_container_width=True, height=_table_height(piv_u.reset_index(), max_px=1200), hide_index=True)
 # -------------------------
 # Executive Summary Export
 # -------------------------
