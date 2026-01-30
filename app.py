@@ -770,8 +770,9 @@ with tab_no_sales:
 # WoW Exceptions
 # -------------------------
 
+
 with tab_wow_exc:
-    st.subheader("Exceptions (Multi-Week Movers)")
+    st.subheader("Exceptions (Recent Week vs Prior Average)")
 
     if df.empty:
         st.info("No sales data yet.")
@@ -781,7 +782,8 @@ with tab_wow_exc:
         if len(weeks_all) < 2:
             st.info("Need at least two weeks of data to compute changes.")
         else:
-            weeks_back = st.selectbox("Compare over last N weeks", options=[1,2,3,4,5], index=0, key="wow_nweeks")
+            # N = number of prior weeks used to compute the baseline average (excluding the most recent week)
+            n_prior = st.selectbox("Baseline average over prior N weeks", options=[1,2,3,4,5], index=1, key="wow_nprior")
             direction = st.selectbox("Direction", options=["Increase", "Decrease"], index=0, key="wow_dir")
             thresh = st.selectbox(
                 "Percent threshold",
@@ -790,10 +792,6 @@ with tab_wow_exc:
                 format_func=lambda x: f"{int(x*100)}%",
                 key="wow_thresh2"
             )
-
-            end_week = weeks_all[-1]
-            start_idx = max(0, len(weeks_all) - 1 - weeks_back)
-            start_week = weeks_all[start_idx]
 
             scope = st.selectbox("Scope", options=["All", "Retailer", "Vendor"], index=0, key="wow_scope2")
             if scope == "Retailer":
@@ -807,62 +805,70 @@ with tab_wow_exc:
             else:
                 d2 = d
 
-            weekly = d2.groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
-            piv_u = weekly.pivot_table(index=["Retailer","Vendor","SKU"], columns="Week", values="Units", aggfunc="sum", fill_value=0.0)
-            piv_s = weekly.pivot_table(index=["Retailer","Vendor","SKU"], columns="Week", values="Sales", aggfunc="sum", fill_value=0.0)
-
-            for w in [start_week, end_week]:
-                if w not in piv_u.columns:
-                    piv_u[w] = 0.0
-                if w not in piv_s.columns:
-                    piv_s[w] = 0.0
-
-            start_u = piv_u[start_week]
-            end_u = piv_u[end_week]
-            start_s = piv_s[start_week]
-            end_s = piv_s[end_week]
-
-            diff_u = end_u - start_u
-            diff_s = end_s - start_s
-            pct_u = diff_u / start_u.replace(0, np.nan)
-
-            res = pd.DataFrame({
-                "Units_Start": start_u,
-                "Units_End": end_u,
-                "Units_Diff": diff_u,
-                "Units_Pct": pct_u,
-                "Sales_Start": start_s,
-                "Sales_End": end_s,
-                "Sales_Diff": diff_s,
-            }).reset_index()
-
-            if direction == "Increase":
-                res = res[((res["Units_Pct"] >= thresh) & res["Units_Pct"].notna()) | ((res["Units_Start"] == 0) & (res["Units_End"] > 0))]
-                res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[False, False])
+            weeks_all2 = sorted(d2["Week"].dropna().unique().tolist())
+            if len(weeks_all2) < 2:
+                st.info("Not enough weeks for this selection.")
             else:
-                res = res[((res["Units_Pct"] <= -thresh) & res["Units_Pct"].notna()) | ((res["Units_End"] == 0) & (res["Units_Start"] > 0))]
-                res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[True, True])
+                end_week = weeks_all2[-1]
+                prior_weeks = weeks_all2[:-1]
+                prior_weeks = prior_weeks[-n_prior:] if len(prior_weeks) >= n_prior else prior_weeks
 
-            res = res.head(100)
+                weekly = d2.groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
 
-            if res.empty:
-                st.info("No items met the threshold for this selection.")
-            else:
-                t = res[["Retailer","Vendor","SKU","Units_Start","Units_End","Units_Diff","Sales_Start","Sales_End","Sales_Diff"]].copy()
-                for c in ["Units_Start","Units_End","Units_Diff"]:
-                    t[c] = t[c].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+                cur = weekly[weekly["Week"] == end_week].groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
+                    Units_End=("Units","sum"),
+                    Sales_End=("Sales","sum")
+                )
 
-                sty = t.style.format({
-                    "Units_Start": lambda v: fmt_int(v),
-                    "Units_End": lambda v: fmt_int(v),
-                    "Units_Diff": lambda v: fmt_int(v),
-                    "Sales_Start": lambda v: fmt_currency(v),
-                    "Sales_End": lambda v: fmt_currency(v),
-                    "Sales_Diff": lambda v: fmt_currency(v),
-                }).applymap(lambda v: f"color: {_color(v)};", subset=["Units_Diff","Sales_Diff"])
+                if len(prior_weeks) == 0:
+                    st.info("Need at least one prior week to build the baseline average.")
+                else:
+                    base = weekly[weekly["Week"].isin(prior_weeks)].groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(
+                        Units=("Units","sum"),
+                        Sales=("Sales","sum")
+                    )
+                    base_avg = base.groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
+                        Units_Base=("Units","mean"),
+                        Sales_Base=("Sales","mean")
+                    )
 
-                st.caption(f"Comparing {pd.Timestamp(start_week).strftime('%m-%d')} → {pd.Timestamp(end_week).strftime('%m-%d')}")
-                st.dataframe(sty, use_container_width=True, height=_table_height(t, max_px=1200), hide_index=True)
+                    res = cur.merge(base_avg, on=["Retailer","Vendor","SKU"], how="outer").fillna(0.0)
+                    res["Units_Diff"] = res["Units_End"] - res["Units_Base"]
+                    res["Sales_Diff"] = res["Sales_End"] - res["Sales_Base"]
+                    res["Units_Pct"] = res["Units_Diff"] / res["Units_Base"].replace(0, np.nan)
+
+                    if direction == "Increase":
+                        res = res[((res["Units_Pct"] >= thresh) & res["Units_Pct"].notna()) | ((res["Units_Base"] == 0) & (res["Units_End"] > 0))]
+                        res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[False, False])
+                    else:
+                        res = res[((res["Units_Pct"] <= -thresh) & res["Units_Pct"].notna()) | ((res["Units_End"] == 0) & (res["Units_Base"] > 0))]
+                        res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[True, True])
+
+                    res = res.head(100)
+
+                    if res.empty:
+                        st.info("No items met the threshold for this selection.")
+                    else:
+                        t = res[["Retailer","Vendor","SKU","Units_Base","Units_End","Units_Diff","Sales_Base","Sales_End","Sales_Diff"]].copy()
+                        t["Units_Base"] = t["Units_Base"].map(lambda v: float(v))
+                        t["Units_End"] = t["Units_End"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+                        t["Units_Diff"] = t["Units_Diff"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+
+                        sty = t.style.format({
+                            "Units_Base": lambda v: fmt_2(v),
+                            "Units_End": lambda v: fmt_int(v),
+                            "Units_Diff": lambda v: fmt_int(v),
+                            "Sales_Base": lambda v: fmt_currency(v),
+                            "Sales_End": lambda v: fmt_currency(v),
+                            "Sales_Diff": lambda v: fmt_currency(v),
+                        }).applymap(lambda v: f"color: {_color(v)};", subset=["Units_Diff","Sales_Diff"])
+
+                        st.caption(
+                            f"Comparing most recent week ({pd.Timestamp(end_week).strftime('%m-%d')}) "
+                            f"to the average of prior {len(prior_weeks)} week(s): "
+                            + ", ".join([pd.Timestamp(w).strftime('%m-%d') for w in prior_weeks])
+                        )
+                        st.dataframe(sty, use_container_width=True, height=_table_height(t, max_px=1200), hide_index=True)
 
 # -------------------------
 # Trends
