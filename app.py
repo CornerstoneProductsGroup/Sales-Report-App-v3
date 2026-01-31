@@ -398,7 +398,16 @@ def apply_effective_prices(df_in: pd.DataFrame, vmap_in: pd.DataFrame, ph: pd.Da
     ph_exact = ph2[ph2["Retailer"] != "*"].sort_values(["Retailer","SKU","StartDate"])
     base = out.sort_values(["Retailer","SKU","StartDate"])
     if not ph_exact.empty:
-        exact = pd.merge_asof(
+        
+    # Ensure keys are proper dtypes and sorted for merge_asof
+    base["StartDate"] = pd.to_datetime(base["StartDate"], errors="coerce")
+    ph["StartDate"] = pd.to_datetime(ph["StartDate"], errors="coerce")
+
+    # merge_asof requires both frames sorted by group keys then "on" key
+    base = base.sort_values(["Retailer", "SKU", "StartDate"]).reset_index(drop=True)
+    ph = ph.sort_values(["Retailer", "SKU", "StartDate"]).reset_index(drop=True)
+
+    exact = pd.merge_asof(
             base,
             ph_exact.rename(columns={"Price":"PHPrice"}),
             by=["Retailer","SKU"],
