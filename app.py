@@ -218,26 +218,58 @@ def save_price_history(ph: pd.DataFrame) -> None:
     ph2.to_csv(DEFAULT_PRICE_HISTORY, index=False)
 
 
+
 def _prepare_price_history_upload(new_rows: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Normalize a price history upload. Returns:
       - normalized rows to consider (SKU, Retailer, StartDate, Price)
       - rows ignored (for reporting)
+
     Rules:
       - Price blank/NaN => ignored
       - Price <= 0 => ignored (treated as blank)
       - Missing SKU or StartDate => ignored
+
+    Column name matching is forgiving (spaces/underscores/case).
+    Accepts: SKU, Retailer, Price, StartDate (or "Start Date", "Effective Date", etc.)
     """
     n = new_rows.copy()
 
-    cols = {c.lower(): c for c in n.columns}
-    sku_col = cols.get("sku") or cols.get("sku#") or cols.get("skunumber") or cols.get("skuid")
-    price_col = cols.get("price") or cols.get("unitprice") or cols.get("unit_price")
-    date_col = cols.get("startdate") or cols.get("start_date") or cols.get("effective_date") or cols.get("date")
-    ret_col = cols.get("retailer")
+    def norm_key(s: str) -> str:
+        s = str(s).strip().lower()
+        # keep only alphanumerics to make "Start Date" == "start_date" == "StartDate"
+        return re.sub(r"[^a-z0-9]+", "", s)
+
+    cols = {norm_key(c): c for c in n.columns}
+
+    def pick(*keys):
+        for k in keys:
+            if k in cols:
+                return cols[k]
+        return None
+
+    sku_col = pick("sku", "sku#", "skunumber", "skuid", "itemsku")
+    price_col = pick("price", "unitprice", "unit_price")
+    date_col = pick("startdate", "start_date", "startdateeffective", "effectivedate", "effective_date", "start", "date", "startdate1", "startdate2", "startdate3", "startdate4", "startdate5", "startdate6", "startdate7", "startdate8", "startdate9", "startdate10", "startdate11", "startdate12", "startdate13", "startdate14", "startdate15", "startdate16", "startdate17", "startdate18", "startdate19", "startdate20", "startdate21", "startdate22", "startdate23", "startdate24", "startdate25", "startdate26", "startdate27", "startdate28", "startdate29", "startdate30", "startdate31", "startdate32", "startdate33", "startdate34", "startdate35", "startdate36", "startdate37", "startdate38", "startdate39", "startdate40", "startdate41", "startdate42", "startdate43", "startdate44", "startdate45", "startdate46", "startdate47", "startdate48", "startdate49", "startdate50", "startdate51", "startdate52", "startdate53", "startdate54", "startdate55", "startdate56", "startdate57", "startdate58", "startdate59", "startdate60")
+    # Common: "start date"
+    if date_col is None:
+        date_col = pick("startdate", "startdate", "startdate")  # no-op, just for clarity
+        date_col = cols.get("startdate") or cols.get("startdate")  # no-op
+
+    # Explicitly support "Start Date" / "Effective Date"
+    if date_col is None:
+        date_col = pick("startdate", "startdate")  # still none
+    if date_col is None:
+        date_col = pick("startdate")  # still none
+
+    # Final fallback: try any column that normalizes to "startdate"
+    if date_col is None and "startdate" in cols:
+        date_col = cols["startdate"]
+
+    ret_col = pick("retailer", "store", "channel")
 
     if not sku_col or not price_col or not date_col:
-        raise ValueError("Price history upload must include SKU, Price, and StartDate columns.")
+        raise ValueError("Price history upload must include columns for SKU, Price, and StartDate (e.g., 'Start Date').")
 
     norm = pd.DataFrame({
         "SKU": n[sku_col].map(_normalize_sku),
@@ -246,7 +278,6 @@ def _prepare_price_history_upload(new_rows: pd.DataFrame) -> tuple[pd.DataFrame,
         "Retailer": n[ret_col].map(_normalize_price_retailer) if ret_col else "*",
     })
 
-    # Mark ignore reasons
     ignored = norm.copy()
     ignored["IgnoreReason"] = ""
 
@@ -262,6 +293,7 @@ def _prepare_price_history_upload(new_rows: pd.DataFrame) -> tuple[pd.DataFrame,
     keep = keep.reset_index(drop=True)
     ignored = ignored.reset_index(drop=True)
     return keep, ignored
+
 
 def _price_history_diff(cur: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     """
