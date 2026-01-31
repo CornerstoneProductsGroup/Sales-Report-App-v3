@@ -422,8 +422,8 @@ def apply_effective_prices(base: pd.DataFrame, vmap: pd.DataFrame, ph: pd.DataFr
 
     # Apply retailer-specific prices
     if not ph_exact.empty and not base_valid.empty:
-        b1 = base_valid.sort_values(["Retailer", "SKU", "StartDate"], kind="mergesort").reset_index(drop=True)
-        p1 = ph_exact.sort_values(["Retailer", "SKU", "StartDate"], kind="mergesort").reset_index(drop=True)
+        b1 = base_valid.sort_values(["StartDate","Retailer","SKU"], kind="mergesort").reset_index(drop=True)
+        p1 = ph_exact.sort_values(["StartDate","Retailer","SKU"], kind="mergesort").reset_index(drop=True)
 
         exact = pd.merge_asof(
             b1,
@@ -444,8 +444,8 @@ def apply_effective_prices(base: pd.DataFrame, vmap: pd.DataFrame, ph: pd.DataFr
         missing = base_valid["UnitPrice"].isna() & base_valid["PriceEffective"].isna()
         if missing.any():
             b2 = base_valid.loc[missing].copy()
-            b2 = b2.sort_values(["SKU", "StartDate"], kind="mergesort").reset_index(drop=True)
-            p2 = ph_star.sort_values(["SKU", "StartDate"], kind="mergesort").reset_index(drop=True)
+            b2 = b2.sort_values(["StartDate","SKU"], kind="mergesort").reset_index(drop=True)
+            p2 = ph_star.sort_values(["StartDate","SKU"], kind="mergesort").reset_index(drop=True)
 
             star = pd.merge_asof(
                 b2,
