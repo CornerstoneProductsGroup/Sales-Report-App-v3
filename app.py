@@ -281,10 +281,29 @@ def _prepare_price_history_upload(new_rows: pd.DataFrame) -> tuple[pd.DataFrame,
     ignored = norm.copy()
     ignored["IgnoreReason"] = ""
 
-    ignored.loc[ignored["SKU"].isna() | (ignored["SKU"].astype(str).str.strip() == ""), "IgnoreReason"] = "Missing SKU"
-    ignored.loc[ignored["StartDate"].isna(), "IgnoreReason"] = np.where(ignored["IgnoreReason"] == "", "Missing StartDate", ignored["IgnoreReason"])
-    ignored.loc[ignored["Price"].isna(), "IgnoreReason"] = np.where(ignored["IgnoreReason"] == "", "Blank Price", ignored["IgnoreReason"])
-    ignored.loc[(ignored["Price"].notna()) & (ignored["Price"] <= 0), "IgnoreReason"] = np.where(ignored["IgnoreReason"] == "", "Price <= 0", ignored["IgnoreReason"])
+    mask = ignored["SKU"].isna() | (ignored["SKU"].astype(str).str.strip() == "")
+    ignored.loc[mask, "IgnoreReason"] = "Missing SKU"
+
+    mask = ignored["StartDate"].isna()
+    ignored.loc[mask, "IgnoreReason"] = np.where(
+        ignored.loc[mask, "IgnoreReason"].eq(""),
+        "Missing StartDate",
+        ignored.loc[mask, "IgnoreReason"]
+    )
+
+    mask = ignored["Price"].isna()
+    ignored.loc[mask, "IgnoreReason"] = np.where(
+        ignored.loc[mask, "IgnoreReason"].eq(""),
+        "Blank Price",
+        ignored.loc[mask, "IgnoreReason"]
+    )
+
+    mask = (ignored["Price"].notna()) & (ignored["Price"] <= 0)
+    ignored.loc[mask, "IgnoreReason"] = np.where(
+        ignored.loc[mask, "IgnoreReason"].eq(""),
+        "Price <= 0",
+        ignored.loc[mask, "IgnoreReason"]
+    )
 
     keep = norm.dropna(subset=["SKU","StartDate","Price"]).copy()
     keep = keep[keep["Price"] > 0].copy()
