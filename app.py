@@ -55,17 +55,22 @@ AVG_WINDOW_OPTIONS = ["4 weeks","5 weeks","6 weeks","7 weeks","8 weeks","9 weeks
                       "January","February","March","April","May","June","July","August","September","October","November","December"]
 
 def resolve_avg_use(avg_window, use_cols, current_year):
-    """Return which week columns to use for averaging. Month choices are within current_year only."""
+    """Return which week columns to use for averaging. Month choices are within current_year only.
+
+    Notes:
+      - use_cols may be a list of datetime.date objects or strings.
+      - Convert to a Series so we can safely use .dt accessors.
+    """
     if not use_cols:
         return []
     if isinstance(avg_window, str) and avg_window in MONTH_NAME_TO_NUM:
         mnum = MONTH_NAME_TO_NUM[avg_window]
-        dates = pd.to_datetime(use_cols, errors='coerce')
-        mask = (dates.dt.year == current_year) & (dates.dt.month == mnum)
+        dates = pd.to_datetime(pd.Series(list(use_cols)), errors="coerce")
+        mask = (dates.dt.year == int(current_year)) & (dates.dt.month == int(mnum))
         cols = [c for c, ok in zip(use_cols, mask.fillna(False).tolist()) if ok]
         return cols
     # rolling weeks like '8 weeks'
-    if isinstance(avg_window, str) and 'week' in avg_window:
+    if isinstance(avg_window, str) and "week" in avg_window:
         try:
             n = int(avg_window.split()[0])
         except Exception:
@@ -999,7 +1004,7 @@ def make_totals_tables(base: pd.DataFrame, group_col: str, tf_weeks, avg_weeks):
         units_p["Diff"] = 0.0
 
     # Determine which weeks to average based on selected average window
-    current_year = int(pd.to_datetime(base["StartDate"], errors="coerce").dt.year.max())
+    current_year = int(pd.to_datetime(base["StartDate"], errors="coerce").dt.year.max() or date.today().year)
     avg_use = resolve_avg_use(avg_weeks, use, current_year)
 
     # Ignore the very first week of the year (partial week)
