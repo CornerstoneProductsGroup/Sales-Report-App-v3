@@ -2316,15 +2316,16 @@ tabs = st.tabs([
     "Totals Dashboard",
     "Top SKUs",
     "Executive Summary",
-    "WoW Exceptions",
     "Comparisons",
+    "WoW Exceptions",
+    
     "SKU Intelligence",
     "Forecasting",
     "Year Summary",
     "Alerts",
     "Data Management",
 ])
-(tab_totals_dash, tab_top_skus, tab_exec, tab_wow_exc, tab_comparisons, tab_sku_intel,
+(tab_totals_dash, tab_top_skus, tab_exec, tab_comparisons, tab_wow_exc, tab_sku_intel,
  tab_forecasting, tab_year_summary, tab_data_mgmt_hub, tab_data_mgmt) = tabs
 
 
@@ -2337,6 +2338,21 @@ tabs = st.tabs([
 
 
 
+
+
+def keep_total_last(df_in: pd.DataFrame, label_col: str) -> pd.DataFrame:
+    """After sorting, keep the TOTAL row (if present) pinned to the bottom."""
+    try:
+        if df_in is None or df_in.empty or label_col not in df_in.columns:
+            return df_in
+        m = df_in[label_col].astype(str).str.upper().eq("TOTAL")
+        if not m.any():
+            return df_in
+        total = df_in.loc[m].copy()
+        rest = df_in.loc[~m].copy()
+        return pd.concat([rest, total], ignore_index=True)
+    except Exception:
+        return df_in
 
 
 def resolve_week_dates(periods: list, window):
@@ -2525,9 +2541,11 @@ with tab_totals_dash:
                 sales_t, units_t = make_totals_tables(d2, group_by, tf_weeks, avg_opt)
                 # Keep alphabetical order for readability
                 if not sales_t.empty and group_by in sales_t.columns:
-                    sales_t = sales_t.sort_values(group_by, ascending=True, kind='mergesort')
+                    sales_t = sales_t.sort_values(group_by, ascending=True, kind="mergesort")
+                    sales_t = keep_total_last(sales_t, group_by)
                 if not units_t.empty and group_by in units_t.columns:
-                    units_t = units_t.sort_values(group_by, ascending=True, kind='mergesort')
+                    units_t = units_t.sort_values(group_by, ascending=True, kind="mergesort")
+                    units_t = keep_total_last(units_t, group_by)
 
                 if sales_t.empty and units_t.empty:
                     st.info("No weekly totals available for the selected filters.")
@@ -2643,7 +2661,7 @@ with tab_top_skus:
         month_name = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
         month_list = [month_name[i] for i in range(1,13)]
 
-        c1, c2, c3, c4 = st.columns([1, 2, 1, 1])
+        c1, c2, c3, c4, c5 = st.columns([1, 2, 1, 1, 1])
         with c1:
             year_opt = ["All years"] + [str(y) for y in years]
             pick_year = st.selectbox("Year", options=year_opt, index=0, key="ts_year")
@@ -2658,6 +2676,15 @@ with tab_top_skus:
             sort_by = st.selectbox("Rank by", options=["Sales", "Units"], index=0, key="ts_rank_by")
         with c4:
             top_n = st.number_input("Top N", min_value=10, max_value=5000, value=50, step=10, key="ts_topn")
+
+        with c5:
+            min_val = st.number_input(
+                f"Min {sort_by}",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                key="ts_min_val"
+            )
 
         f1, f2 = st.columns([2, 2])
         with f1:
@@ -2686,6 +2713,11 @@ with tab_top_skus:
             Sales=("Sales","sum"),
             Retailers=("Retailer","nunique"),
         )
+
+
+        # Apply minimum threshold filter (based on Rank by selection)
+        if 'min_val' in locals() and min_val and sort_by in agg.columns:
+            agg = agg[agg[sort_by].fillna(0) >= float(min_val)].copy()
 
         if agg.empty:
             st.info("No rows match your filters.")
@@ -2768,93 +2800,132 @@ with tab_wow_exc:
             else:
                 d2 = d
 
-            weeks_all2 = sorted(d2["Week"].dropna().unique().tolist())
-            if len(weeks_all2) < 2:
-                st.info("Not enough weeks for this selection.")
-            else:
-                end_week = weeks_all2[-1]
-                prior_weeks = weeks_all2[:-1]
-
-                # Determine prior window based on selector (excluding most recent week)
-                sel = n_prior
-                if isinstance(sel, str) and "month" in sel:
-                    nmo = int(sel.split()[0])
-                    tmp = d2[d2["Week"].isin(prior_weeks)].copy()
-                    tmp["MonthP"] = pd.to_datetime(tmp["StartDate"], errors="coerce").dt.to_period("M")
-                    months = sorted(tmp["MonthP"].dropna().unique().tolist())
-                    usem = months[-nmo:] if len(months) >= nmo else months
-                    tmp = tmp[tmp["MonthP"].isin(usem)]
-                    prior_weeks = sorted(tmp["Week"].dropna().unique().tolist())
-                else:
-                    nw = int(str(sel).split()[0])
-                    prior_weeks = prior_weeks[-nw:] if len(prior_weeks) >= nw else prior_weeks
-
-                weekly = d2.groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
-
-                cur = weekly[weekly["Week"] == end_week].groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
-                    Units_End=("Units","sum"),
-                    Sales_End=("Sales","sum")
+            display_mode = "SKU totals (all retailers)"
+            if scope == "All":
+                display_mode = st.radio(
+                    "Display mode",
+                    options=["SKU totals (all retailers)", "Break out by retailer"],
+                    index=0,
+                    horizontal=True,
+                    key="wow_display_mode"
                 )
 
-                if len(prior_weeks) == 0:
-                    st.info("Need at least one prior week to build the baseline average.")
-                else:
-                    base = weekly[weekly["Week"].isin(prior_weeks)].groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(
-                        Units=("Units","sum"),
-                        Sales=("Sales","sum")
-                    )
-                    base_avg = base.groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
-                        Units_Base=("Units","mean"),
-                        Sales_Base=("Sales","mean")
-                    )
+            
+weeks_all2 = sorted(d2["Week"].dropna().unique().tolist())
+if len(weeks_all2) < 2:
+    st.info("Not enough weeks for this selection.")
+else:
+    end_week = weeks_all2[-1]
+    prior_weeks = weeks_all2[:-1]
 
-                    res = cur.merge(base_avg, on=["Retailer","Vendor","SKU"], how="outer").fillna(0.0)
-                    res["Units_Diff"] = res["Units_End"] - res["Units_Base"]
-                    res["Sales_Diff"] = res["Sales_End"] - res["Sales_Base"]
-                    res["Units_Pct"] = res["Units_Diff"] / res["Units_Base"].replace(0, np.nan)
+    # Determine prior window based on selector (excluding most recent week)
+    sel = n_prior
+    if isinstance(sel, str) and "month" in sel:
+        nmo = int(sel.split()[0])
+        tmp = d2[d2["Week"].isin(prior_weeks)].copy()
+        tmp["MonthP"] = pd.to_datetime(tmp["StartDate"], errors="coerce").dt.to_period("M")
+        months = sorted(tmp["MonthP"].dropna().unique().tolist())
+        usem = months[-nmo:] if len(months) >= nmo else months
+        tmp = tmp[tmp["MonthP"].isin(usem)].copy()
+        prior_weeks = sorted(tmp["Week"].dropna().unique().tolist())
+    else:
+        try:
+            nw = int(str(sel).split()[0])
+        except Exception:
+            nw = 4
+        prior_weeks = prior_weeks[-nw:] if len(prior_weeks) >= nw else prior_weeks
 
+    if scope == "All" and display_mode.startswith("SKU totals"):
+        weekly = d2.groupby(["SKU","Week"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
+        cur = weekly[weekly["Week"] == end_week].groupby(["SKU"], as_index=False).agg(
+            Units_End=("Units","sum"),
+            Sales_End=("Sales","sum")
+        )
+    else:
+        weekly = d2.groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
+        cur = weekly[weekly["Week"] == end_week].groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
+            Units_End=("Units","sum"),
+            Sales_End=("Sales","sum")
+        )
 
-                    # Require at least one prior week with sales/units (exclude brand-new items)
-                    res = res[(res["Units_Base"] > 0) | (res["Sales_Base"] > 0)]
-                    if direction == "Increase":
-                        res = res[(res["Units_Pct"] >= thresh) & res["Units_Pct"].notna()]
-                        res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[False, False])
-                    else:
-                        res = res[(res["Units_Pct"] <= -thresh) & res["Units_Pct"].notna()]
-                        res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[True, True])
+    if len(prior_weeks) == 0:
+        st.info("Need at least one prior week to build the baseline average.")
+    else:
+        if scope == "All" and display_mode.startswith("SKU totals"):
+            base = weekly[weekly["Week"].isin(prior_weeks)].groupby(["SKU","Week"], as_index=False).agg(
+                Units=("Units","sum"),
+                Sales=("Sales","sum")
+            )
+            base_avg = base.groupby(["SKU"], as_index=False).agg(
+                Units_Base=("Units","mean"),
+                Sales_Base=("Sales","mean")
+            )
+            res = cur.merge(base_avg, on=["SKU"], how="outer").fillna(0.0)
 
-                    res = res.head(100)
+            # Add labels for vendor + retailer count for context
+            vend = d2.groupby("SKU")["Vendor"].agg(lambda s: (s.dropna().astype(str).str.strip().replace("", np.nan).dropna().iloc[0] if (s.dropna().astype(str).str.strip().replace("", np.nan).dropna().shape[0] > 0) else "Unmapped"))
+            rets = d2.groupby("SKU")["Retailer"].nunique()
+            res = res.merge(vend.rename("Vendor"), on="SKU", how="left")
+            res = res.merge(rets.rename("Retailers"), on="SKU", how="left")
+            res["Vendor"] = res["Vendor"].fillna("Unmapped")
+            res["Retailers"] = res["Retailers"].fillna(0).astype(int)
+        else:
+            base = weekly[weekly["Week"].isin(prior_weeks)].groupby(["Retailer","Vendor","SKU","Week"], as_index=False).agg(
+                Units=("Units","sum"),
+                Sales=("Sales","sum")
+            )
+            base_avg = base.groupby(["Retailer","Vendor","SKU"], as_index=False).agg(
+                Units_Base=("Units","mean"),
+                Sales_Base=("Sales","mean")
+            )
+            res = cur.merge(base_avg, on=["Retailer","Vendor","SKU"], how="outer").fillna(0.0)
 
-                    if res.empty:
-                        st.info("No items met the threshold for this selection.")
-                    else:
-                        t = res[["Retailer","Vendor","SKU","Units_Base","Units_End","Units_Diff","Units_Pct","Sales_Base","Sales_End","Sales_Diff"]].copy()
-                        t["Units_Base"] = t["Units_Base"].map(lambda v: float(v))
-                        t["Units_End"] = t["Units_End"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
-                        t["Units_Diff"] = t["Units_Diff"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
-                        # Rename for display
-                        t = t.rename(columns={"Units_Pct":"% Diff"})
+        res["Units_Diff"] = res["Units_End"] - res["Units_Base"]
+        res["Sales_Diff"] = res["Sales_End"] - res["Sales_Base"]
+        res["Units_Pct"] = res["Units_Diff"] / res["Units_Base"].replace(0, np.nan)
 
-                        sty = t.style.format({
-                            "Units_Base": lambda v: fmt_2(v),
-                            "Units_End": lambda v: fmt_int(v),
-                            "Units_Diff": lambda v: fmt_int(v),
-                            "% Diff": lambda v: f"{(v*100):.1f}%" if pd.notna(v) else "—",
-                            "Sales_Base": lambda v: fmt_currency(v),
-                            "Sales_End": lambda v: fmt_currency(v),
-                            "Sales_Diff": lambda v: fmt_currency(v),
-                        }).applymap(lambda v: f"color: {_color(v)};", subset=["Units_Diff","Sales_Diff"])
+        # Require at least one prior week with sales/units (exclude brand-new items)
+        res = res[(res["Units_Base"] > 0) | (res["Sales_Base"] > 0)]
 
-                        st.caption(
-                            f"Comparing most recent week ({pd.Timestamp(end_week).strftime('%m-%d')}) "
-                            f"to the average of prior {len(prior_weeks)} week(s): "
-                            + ", ".join([pd.Timestamp(w).strftime('%m-%d') for w in prior_weeks])
-                        )
-                        st.dataframe(sty, use_container_width=True, height=_table_height(t, max_px=1200), hide_index=True)
+        if direction == "Increase":
+            res = res[(res["Units_Pct"] >= thresh) & res["Units_Pct"].notna()]
+            res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[False, False])
+        else:
+            res = res[(res["Units_Pct"] <= -thresh) & res["Units_Pct"].notna()]
+            res = res.sort_values(["Units_Diff","Sales_Diff"], ascending=[True, True])
 
+        res = res.head(100)
 
+        if res.empty:
+            st.info("No items met the threshold for this selection.")
+        else:
+            if scope == "All" and display_mode.startswith("SKU totals"):
+                t = res[["SKU","Vendor","Retailers","Units_Base","Units_End","Units_Diff","Units_Pct","Sales_Base","Sales_End","Sales_Diff"]].copy()
+            else:
+                t = res[["Retailer","Vendor","SKU","Units_Base","Units_End","Units_Diff","Units_Pct","Sales_Base","Sales_End","Sales_Diff"]].copy()
 
+            t["Units_Base"] = t["Units_Base"].map(lambda v: float(v))
+            t["Units_End"] = t["Units_End"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
+            t["Units_Diff"] = t["Units_Diff"].map(lambda v: int(round(float(v))) if pd.notna(v) else 0)
 
+            t = t.rename(columns={"Units_Pct":"% Diff"})
+
+            sty = t.style.format({
+                "Units_Base": lambda v: fmt_2(v),
+                "Units_End": lambda v: fmt_int(v),
+                "Units_Diff": lambda v: fmt_int(v),
+                "% Diff": lambda v: f"{(v*100):.1f}%" if pd.notna(v) else "—",
+                "Sales_Base": lambda v: fmt_currency(v),
+                "Sales_End": lambda v: fmt_currency(v),
+                "Sales_Diff": lambda v: fmt_currency(v),
+            }).applymap(lambda v: f"color: {_color(v)};", subset=["Units_Diff","Sales_Diff"])
+
+            st.caption(
+                f"Comparing most recent week ({pd.Timestamp(end_week).strftime('%m-%d')}) "
+                f"to the average of prior {len(prior_weeks)} week(s): "
+                + ", ".join([pd.Timestamp(w).strftime('%m-%d') for w in prior_weeks])
+            )
+            st.dataframe(sty, use_container_width=True, height=_table_height(t, max_px=1200), hide_index=True)
 # -------------------------
 # Comparison
 # -------------------------
@@ -3222,6 +3293,31 @@ with tab_exec:
 
     st.divider()
 
+    
+if scope == "All":
+    # Aggregate SKUs across all retailers (one line per SKU)
+    sku_agg = d.groupby(["SKU"], as_index=False).agg(
+        Units=("Units","sum"),
+        Sales=("Sales","sum"),
+        Retailers=("Retailer","nunique"),
+    )
+    # pick a vendor label (first non-blank) for display
+    vend = d.groupby("SKU")["Vendor"].agg(
+        lambda s: (
+            s.dropna().astype(str).str.strip().replace("", np.nan).dropna().iloc[0]
+            if (s.dropna().astype(str).str.strip().replace("", np.nan).dropna().shape[0] > 0)
+            else "Unmapped"
+        )
+    )
+    sku_agg = sku_agg.merge(vend.rename("Vendor"), on="SKU", how="left")
+    sku_agg["Vendor"] = sku_agg["Vendor"].fillna("Unmapped")
+    sold = sku_agg[(sku_agg["Units"].fillna(0) > 0) & (sku_agg["Sales"].fillna(0) > 0)].copy()
+
+    top_units = sold.sort_values("Units", ascending=False).head(10)[["SKU","Vendor","Retailers","Units"]].copy()
+    top_sales = sold.sort_values("Sales", ascending=False).head(10)[["SKU","Vendor","Retailers","Sales"]].copy()
+    bot_units = sold.sort_values("Units", ascending=True).head(10)[["SKU","Vendor","Retailers","Units"]].copy()
+    bot_sales = sold.sort_values("Sales", ascending=True).head(10)[["SKU","Vendor","Retailers","Sales"]].copy()
+else:
     sku_agg = d.groupby(["SKU","Retailer","Vendor"], as_index=False).agg(Units=("Units","sum"), Sales=("Sales","sum"))
     sku_agg["Vendor"] = sku_agg["Vendor"].fillna("Unmapped")
     sold = sku_agg[(sku_agg["Units"].fillna(0) > 0) & (sku_agg["Sales"].fillna(0) > 0)].copy()
@@ -3230,7 +3326,6 @@ with tab_exec:
     top_sales = sold.sort_values("Sales", ascending=False).head(10)[["SKU","Retailer","Vendor","Sales"]].copy()
     bot_units = sold.sort_values("Units", ascending=True).head(10)[["SKU","Retailer","Vendor","Units"]].copy()
     bot_sales = sold.sort_values("Sales", ascending=True).head(10)[["SKU","Retailer","Vendor","Sales"]].copy()
-
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("### Top 10 SKUs by Units")
@@ -3277,8 +3372,17 @@ with tab_exec:
             f"MoM Units: {fmt_int(m['mom_units']) if m['mom_units'] is not None else '—'}",
             f"MoM Sales: {fmt_currency(m['mom_sales']) if m['mom_sales'] is not None else '—'}",
         ]),
-        ("Top 10 SKUs by Units", [f"{r.SKU} | {r.Retailer} | {r.Vendor} | {int(round(r.Units))}" for r in top_units.itertuples(index=False)]),
-        ("Top 10 SKUs by Sales", [f"{r.SKU} | {r.Retailer} | {r.Vendor} | {fmt_currency(r.Sales)}" for r in top_sales.itertuples(index=False)]),
+        
+("Top 10 SKUs by Units", [
+    (f"{r.SKU} | {r.Vendor} | {getattr(r,'Retailers', '')} | {int(round(r.Units))}" if scope=="All"
+     else f"{r.SKU} | {r.Retailer} | {r.Vendor} | {int(round(r.Units))}")
+    for r in top_units.itertuples(index=False)
+]),
+("Top 10 SKUs by Sales", [
+    (f"{r.SKU} | {r.Vendor} | {getattr(r,'Retailers', '')} | {fmt_currency(r.Sales)}" if scope=="All"
+     else f"{r.SKU} | {r.Retailer} | {r.Vendor} | {fmt_currency(r.Sales)}")
+    for r in top_sales.itertuples(index=False)
+]),
     ]
     pdf_bytes = to_pdf_bytes(title, sections)
     if pdf_bytes:
