@@ -2217,101 +2217,172 @@ def render_runrate():
     # -------------------------
 
 
+
 def render_alerts():
         st.subheader("Insights & Alerts")
 
         if df_all.empty:
             st.info("No sales data yet.")
-        else:
-            d = df_all.copy()
-            d["StartDate"] = pd.to_datetime(d["StartDate"], errors="coerce")
-            d = d[d["StartDate"].notna()].copy()
-            d["Year"] = d["StartDate"].dt.year.astype(int)
-            years = sorted(d["Year"].unique().tolist())
+            return
 
+        d = df_all.copy()
+        d["StartDate"] = pd.to_datetime(d["StartDate"], errors="coerce")
+        d = d[d["StartDate"].notna()].copy()
+        d["Year"] = d["StartDate"].dt.year.astype(int)
+        d["MonthP"] = d["StartDate"].dt.to_period("M")
+
+        years = sorted(d["Year"].unique().tolist())
+        months = sorted(d["MonthP"].unique().tolist())
+        month_labels = [m.to_timestamp().strftime("%B %Y") for m in months]
+        label_to_period = dict(zip(month_labels, months))
+
+        # --- Period selection ---
+        period_mode = st.radio(
+            "Period selection",
+            options=["Full year (Year vs Year)", "Specific months (A vs B)"],
+            index=0,
+            horizontal=True,
+            key="al_period_mode",
+        )
+
+        def _summarize_months(pers: list[pd.Period]) -> str:
+            if not pers:
+                return "—"
+            pers_sorted = sorted(pers)
+            labels = [p.to_timestamp().strftime("%b %Y") for p in pers_sorted]
+            if len(labels) == 1:
+                return labels[0]
+            # If they look contiguous, show range; otherwise show count
+            try:
+                diffs = [(pers_sorted[i+1] - pers_sorted[i]).n for i in range(len(pers_sorted)-1)]
+                if diffs and all(int(x) == 1 for x in diffs):
+                    return f"{labels[0]}–{labels[-1]}"
+            except Exception:
+                pass
+            return f"{len(labels)} months"
+
+        if period_mode.startswith("Full year"):
             c1, c2 = st.columns(2)
             with c1:
                 base_year = st.selectbox("Base Year", options=years, index=0, key="al_base")
             with c2:
                 comp_opts = [y for y in years if y != int(base_year)]
-            if not comp_opts:
-                st.warning("Only one year of data available. Add another year to compare.")
-                comp_year = int(base_year)  # fallback
-            else:
-                comp_year = st.selectbox("Comparison Year", options=comp_opts, index=0, key="al_comp")
-
-            basis = st.radio("Basis", options=["Sales", "Units"], index=0, horizontal=True, key="al_basis")
-            value_col = "Sales" if basis == "Sales" else "Units"
+                if not comp_opts:
+                    st.warning("Only one year of data available. Add another year to compare, or use Specific months.")
+                    comp_year = int(base_year)
+                else:
+                    comp_year = st.selectbox("Comparison Year", options=comp_opts, index=0, key="al_comp")
 
             a = d[d["Year"] == int(base_year)].copy()
             b = d[d["Year"] == int(comp_year)].copy()
+            label_a = str(base_year)
+            label_b = str(comp_year)
 
-            insights = []
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                a_pick = st.multiselect(
+                    "Selection A months",
+                    options=month_labels,
+                    default=month_labels[-1:] if month_labels else [],
+                    key="al_a_months",
+                )
+            with c2:
+                b_pick = st.multiselect(
+                    "Selection B months",
+                    options=month_labels,
+                    default=month_labels[-2:-1] if len(month_labels) >= 2 else [],
+                    key="al_b_months",
+                )
 
-            # Vendor deltas (worst 5)
-            va = a.groupby("Vendor", as_index=False).agg(A=(value_col, "sum"))
-            vb = b.groupby("Vendor", as_index=False).agg(B=(value_col, "sum"))
-            v = va.merge(vb, on="Vendor", how="outer").fillna(0.0)
-            v["Delta"] = v["B"] - v["A"]
-            v = v.sort_values("Delta")
+            a_periods = [label_to_period[x] for x in a_pick if x in label_to_period]
+            b_periods = [label_to_period[x] for x in b_pick if x in label_to_period]
 
-            def _fmt(vv):
-                return fmt_currency(vv) if value_col == "Sales" else fmt_int(vv)
+            if not a_periods or not b_periods:
+                st.info("Pick at least one month in Selection A and Selection B to generate alerts.")
+                return
 
-            for _, row in v.head(5).iterrows():
-                if row["Delta"] < 0:
-                    insights.append(f"🔻 Vendor **{row['Vendor']}** down {_fmt(row['Delta'])} ({base_year} → {comp_year}).")
+            a = d[d["MonthP"].isin(a_periods)].copy()
+            b = d[d["MonthP"].isin(b_periods)].copy()
+            label_a = _summarize_months(a_periods)
+            label_b = _summarize_months(b_periods)
 
-            # Retailer concentration warning (top 1 >= 40%)
-            g = b.groupby("Retailer", as_index=False).agg(val=(value_col, "sum")).sort_values("val", ascending=False)
-            total = float(g["val"].sum())
-            if total > 0 and not g.empty:
-                top1_share = float(g.iloc[0]["val"]) / total
-                if top1_share >= 0.40:
-                    insights.append(f"⚠️ Concentration risk: **{g.iloc[0]['Retailer']}** is {top1_share*100:.1f}% of {comp_year} ({value_col}).")
+        basis = st.radio("Basis", options=["Sales", "Units"], index=0, horizontal=True, key="al_basis")
+        value_col = "Sales" if basis == "Sales" else "Units"
 
-            # Growth driven by few SKUs (top10 >= 60% of positive delta)
-            sa = a.groupby("SKU", as_index=False).agg(A=(value_col, "sum"))
-            sb = b.groupby("SKU", as_index=False).agg(B=(value_col, "sum"))
-            sku = sa.merge(sb, on="SKU", how="outer").fillna(0.0)
-            sku["Delta"] = sku["B"] - sku["A"]
+        insights = []
 
-            pos = sku[sku["Delta"] > 0].sort_values("Delta", ascending=False)
-            if not pos.empty:
-                top10 = float(pos.head(10)["Delta"].sum())
-                total_pos = float(pos["Delta"].sum())
-                share = (top10 / total_pos) if total_pos else 0.0
-                if share >= 0.60:
-                    insights.append(f"📈 Growth concentration: top 10 SKUs drive {share*100:.1f}% of positive YoY change ({value_col}).")
+        # Vendor deltas (worst 5)
+        va = a.groupby("Vendor", as_index=False).agg(A=(value_col, "sum"))
+        vb = b.groupby("Vendor", as_index=False).agg(B=(value_col, "sum"))
+        v = va.merge(vb, on="Vendor", how="outer").fillna(0.0)
+        v["Delta"] = v["B"] - v["A"]
+        v = v.sort_values("Delta")
 
-            # Lost SKUs count
-            lost = int(((sku["A"] > 0) & (sku["B"] == 0)).sum())
-            if lost:
-                insights.append(f"🧯 Lost SKUs: **{lost}** SKUs sold in {base_year} but not in {comp_year}.")
+        def _fmt(vv):
+            return fmt_currency(vv) if value_col == "Sales" else fmt_int(vv)
 
-            # Year locks notice
-            locked = sorted(list(load_year_locks()))
-            if locked:
-                insights.append(f"🔒 Locked years: {', '.join(str(y) for y in locked)} (bulk ingest blocked).")
+        for _, row in v.head(5).iterrows():
+            if row["Delta"] < 0:
+                insights.append(f"🔻 Vendor **{row['Vendor']}** down {_fmt(row['Delta'])} ({label_a} → {label_b}).")
 
-            if not insights:
-                st.success("No major alerts detected with the current settings.")
-            else:
-                st.markdown("### Highlights")
-                for s in insights:
-                    st.markdown(f"- {s}")
+        # Retailer concentration warning (top 1 >= 40%)
+        g = b.groupby("Retailer", as_index=False).agg(val=(value_col, "sum")).sort_values("val", ascending=False)
+        total = float(g["val"].sum())
+        if total > 0 and not g.empty:
+            top1_share = float(g.iloc[0]["val"]) / total
+            if top1_share >= 0.40:
+                insights.append(f"⚠️ Concentration risk: **{g.iloc[0]['Retailer']}** is {top1_share*100:.1f}% of {label_b} ({value_col}).")
 
-            with st.expander("Details (tables)", expanded=False):
-                st.markdown("**Worst vendors**")
-                st.dataframe(v.head(15).style.format({"A": _fmt, "B": _fmt, "Delta": _fmt})
-                             .applymap(lambda v: f"color: {_color(v)};", subset=["Delta"]),
-                             use_container_width=True, hide_index=True)
+        # Growth driven by few SKUs (top10 >= 60% of positive delta)
+        sa = a.groupby("SKU", as_index=False).agg(A=(value_col, "sum"))
+        sb = b.groupby("SKU", as_index=False).agg(B=(value_col, "sum"))
+        sku = sa.merge(sb, on="SKU", how="outer").fillna(0.0)
+        sku["Delta"] = sku["B"] - sku["A"]
 
-                st.markdown("**Top SKU movers**")
-                movers = sku.sort_values("Delta", ascending=False).head(15).copy()
-                st.dataframe(movers.style.format({"A": _fmt, "B": _fmt, "Delta": _fmt})
-                             .applymap(lambda v: f"color: {_color(v)};", subset=["Delta"]),
-                             use_container_width=True, hide_index=True)
+        pos = sku[sku["Delta"] > 0].sort_values("Delta", ascending=False)
+        if not pos.empty:
+            top10 = float(pos.head(10)["Delta"].sum())
+            total_pos = float(pos["Delta"].sum())
+            share = (top10 / total_pos) if total_pos else 0.0
+            if share >= 0.60:
+                insights.append(f"📈 Growth concentration: top 10 SKUs drive {share*100:.1f}% of positive change ({value_col}) ({label_a} → {label_b}).")
+
+        # Lost SKUs count (had A but not B)
+        lost = int(((sku["A"] > 0) & (sku["B"] == 0)).sum())
+        if lost:
+            insights.append(f"🧯 Lost SKUs: **{lost}** SKUs sold in {label_a} but not in {label_b}.")
+
+        # Year locks notice
+        locked = sorted(list(load_year_locks()))
+        if locked:
+            insights.append(f"🔒 Locked years: {', '.join(str(y) for y in locked)} (bulk ingest blocked).")
+
+        if not insights:
+            st.success("No major alerts detected with the current settings.")
+        else:
+            st.markdown("### Highlights")
+            for s in insights:
+                st.markdown(f"- {s}")
+
+        with st.expander("Details (tables)", expanded=False):
+            st.markdown("**Worst vendors**")
+            st.dataframe(
+                v.head(15).style.format({"A": _fmt, "B": _fmt, "Delta": _fmt})
+                .applymap(lambda v: f"color: {_color(v)};", subset=["Delta"]),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.markdown("**Top SKU movers**")
+            movers = sku.sort_values("Delta", ascending=False).head(15).copy()
+            st.dataframe(
+                movers.style.format({"A": _fmt, "B": _fmt, "Delta": _fmt})
+                .applymap(lambda v: f"color: {_color(v)};", subset=["Delta"]),
+                use_container_width=True,
+                hide_index=True
+            )
+
 
     # Run-Rate Forecast
     # -------------------------
